@@ -1,17 +1,17 @@
 package server
 
 import (
-	"encoding/json"
-	"html/template"
 	"net/http"
-	"time"
 
-	"github.com/go-chi/chi"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/gorilla/mux"
 	"go.uber.org/zap"
 )
 
 type Server struct {
-	logger *zap.SugaredLogger
+	logger  *zap.SugaredLogger
+	session *session.Session
 }
 
 type Package struct {
@@ -27,76 +27,38 @@ type Info struct {
 }
 
 func New(logger *zap.SugaredLogger) *Server {
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String("eu-west-1"),
+	})
+	if err != nil {
+		logger.Fatalw("cannot start server", "error", err)
+	}
+
+	if err != nil {
+		logger.Errorw("cannot create table", "error", err)
+	}
+
 	return &Server{
-		logger: logger,
+		logger:  logger,
+		session: sess,
 	}
 }
-
-const proxy string = `
-	<html>
-		<head>
-			<meta name="go-import" content="local.grmpkg.com/{{.Scope}}/{{.Package}} mod http://local.grmpkg.com/" />
-		</head>
-		<body><a href="/{{.Scope}}/{{.Package}}">Package</a></body>
-	</html>
-`
 
 func (s *Server) Start() {
 	s.logger.Infow("starting server")
 
-	r := chi.NewRouter()
+	r := mux.NewRouter()
+	subRouter := r.PathPrefix("/{package:[A-Za-z0-9/.]+}/@v/").Subrouter()
 
-	r.Route("/{scope}/{package}", func(r chi.Router) {
-		r.Get("/", func(rw http.ResponseWriter, r *http.Request) {
-			p := Package{
-				Scope:   chi.URLParam(r, "scope"),
-				Package: chi.URLParam(r, "package"),
-			}
-			s.logger.Infow("getting package", "packageInfo", p)
-			tpl, _ := template.New("template").Parse(proxy)
-			tpl.Execute(rw, p)
-		})
-	})
+	r.HandleFunc("/{package:[A-Za-z0-9/.]+}", s.PackageHTMLHandler()).Methods(http.MethodGet)
+	r.HandleFunc("/{package:[A-Za-z0-9/.]+}/@latest", s.PackageLatestHandler()).Methods(http.MethodGet)
 
-	r.Route("/{domain}/{scope}/{package}", func(r chi.Router) {
-		r.Get("/@v/list", func(rw http.ResponseWriter, r *http.Request) {
-			s.logger.Infow("getting version")
-			rw.Write([]byte("v1.1.0\nv1.2.0\nv1.1.2"))
-		})
-		r.Get("/@v/{version:.*}info", func(rw http.ResponseWriter, r *http.Request) {
-			version := chi.URLParam(r, "version")
-			version = version[:len(version)-1]
-			s.logger.Infow("getting info", "version", version, "path", r.URL.Path)
-			json.NewEncoder(rw).Encode(Info{
-				Name:    version,
-				Short:   version,
-				Version: version,
-				Time:    time.Now().Format("2006-01-02T15:04:05Z07:00"),
-			})
-		})
-		r.Get("/@v/{version:.*}mod", func(rw http.ResponseWriter, r *http.Request) {
-			version := chi.URLParam(r, "version")
-			version = version[:len(version)-1]
-			s.logger.Infow("getting mod", "version", version, "path", r.URL.Path)
-			json.NewEncoder(rw).Encode(Info{
-				Name:    version,
-				Short:   version,
-				Version: version,
-				Time:    time.Now().Format("2006-01-02T15:04:05Z07:00"),
-			})
-		})
-		r.Get("/@v/{version:.*}zip", func(rw http.ResponseWriter, r *http.Request) {
-			version := chi.URLParam(r, "version")
-			version = version[:len(version)-1]
-			s.logger.Infow("getting zip", "version", version, "path", r.URL.Path)
-			json.NewEncoder(rw).Encode(Info{
-				Name:    version,
-				Short:   version,
-				Version: version,
-				Time:    time.Now().Format("2006-01-02T15:04:05Z07:00"),
-			})
-		})
-	})
+	r.HandleFunc("/{package:[A-Za-z0-9/.]+}/{version:v(?:[0-9]+)\\.(?:[0-9]+)\\.(?:[0-9]+)(?:-.+)?}", s.UploadHandler()).Methods(http.MethodPost)
+
+	subRouter.HandleFunc("/list", s.ListVersionsHandler()).Methods(http.MethodGet)
+	subRouter.HandleFunc("/{version:v(?:[0-9]+)\\.(?:[0-9]+)\\.(?:[0-9]+)(?:-.+)?}.info", s.PackageInfoHandler()).Methods(http.MethodGet)
+	subRouter.HandleFunc("/{version:v(?:[0-9]+)\\.(?:[0-9]+)\\.(?:[0-9]+)(?:-.+)?}.mod", s.PackageModHandler()).Methods(http.MethodGet)
+	subRouter.HandleFunc("/{version:v(?:[0-9]+)\\.(?:[0-9]+)\\.(?:[0-9]+)(?:-.+)?}.zip", s.PackageZipHandler()).Methods(http.MethodGet)
 
 	http.ListenAndServe(":80", r)
 

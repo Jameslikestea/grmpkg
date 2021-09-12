@@ -1,4 +1,4 @@
-module grmpkg
+module local.grmpkg.com/coal/pkg
 
 go 1.16
 
